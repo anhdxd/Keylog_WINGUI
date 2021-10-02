@@ -38,12 +38,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     lstrcat(ExeDelPath, TempPath);
     lstrcat(ExeDelPath, L"delfile.log");
     // Tạo file để lưu link Exe bên ngoài temp
-    //hExeDel = CreateFile(L"C:\\Users\\VA\\Desktop\\MFC\\Keyl_WINGUI\\Release\\Keyl_WINGUI.exe", GENERIC_ALL, FILE_SHARE_DELETE, 0, CREATE_ALWAYS, FILE_FLAG_DELETE_ON_CLOSE, 0);
-    //while (TRUE)
-    //{
-    //    BOOL del = DeleteFile(L"C:\\Users\\VA\\Desktop\\MFC\\Keyl_WINGUI\\Release\\Keyl_WINGUI.pdb"); // Delete file Bên ngoài
-    //    Sleep(50);
-    //}
     // Check xem file exe có phải trong temp không, nếu không thì copy nó vào temp
     // Và tạo file log lưu link EXE cũ
     if (lstrcmp(ExePath, ExeTempPath) != 0) // Nếu không có trong Temp
